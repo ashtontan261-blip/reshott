@@ -19,29 +19,6 @@ glow_hdr_scale = 1.34
 volumetric_fog_enabled = true
 volumetric_fog_density = 0.01
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_a202f"]
-albedo_color = Color(0.8288784, 0.42587888, 7.70092e-07, 1)
-backlight_enabled = true
-
-[sub_resource type="GDScript" id="GDScript_8vrlf"]
-script/source = "extends Area3D
-
-@export var bounce_power: float = 20
-
-func _ready() -> void:
-	body_entered.connect(_on_body_entered)
-
-func _on_body_entered(body: Node3D) -> void:
-		if body is CharacterBody3D:
-			body.velocity.y = bounce_power
-"
-
-[sub_resource type="BoxShape3D" id="BoxShape3D_1vivr"]
-size = Vector3(1.2861328, 1, 1)
-
-[sub_resource type="BoxShape3D" id="BoxShape3D_v5gy4"]
-size = Vector3(2.625, 0.32373047, 2.6323853)
-
 [sub_resource type="GDScript" id="GDScript_4xowi"]
 script/source = "extends CharacterBody3D
 
@@ -51,21 +28,32 @@ script/source = "extends CharacterBody3D
 @onready var raycast_end: Node3D = %RayCastEnd
 @onready var bullet_start_marker: Marker3D = %BulletStartMarker
 @export var respawn_position: Vector3 = Vector3(0, 5, 0)
-const BULLET = preload(\"res://scenes/bullet.tscn\")
+@export var normal_fov: float = 75.0
+@export var ads_fov: float = 40.0
+@export var ads_speed: float = 0.15
+@onready var gun_node: Node3D = $neck/Camera3D/\"Automag 3\"
+@export var gun_ads_position: Vector3 = Vector3(0, -0.186, -0.409)
+@export var gun_ads_rotation: Vector3 = Vector3(0, 90, 0)
+@onready var crosshair: Control = %Crosshair
 
-
-
-const SPEED = 8.0
-const JUMP_VELOCITY = 5
-
-
+var bullet_velocity: Vector3 = Vector3.ZERO
 var current_checkpoint_id: int = 0
+var is_ads_active: bool = false
+var gun_default_position: Vector3
+var gun_default_rotation: Vector3
+const BULLET = preload(\"res://scenes/bullet.tscn\")
+const SPEED = 8.0
+const JUMP_VELOCITY = 7
+
 
 func _ready():
 	add_to_group(\"player\")
-	
+	respawn_position = global_position
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	
+	if gun_node:
+		gun_default_position = gun_node.transform.origin
+		gun_default_rotation = gun_node.transform.basis.get_euler()
 	
 func _input(event):
 	if event.is_action_pressed(\"ui_cancel\"): get_tree().quit()
@@ -73,15 +61,14 @@ func _input(event):
 	if Input.is_action_just_pressed(\"left_mouse_click\"):
 		_shoot()
 	
-
-
+	
 func _shoot():
-	var bulletNode = BULLET.instantiate() as Area3D # Or whatever your bullet scene's root node type is
+	var bulletNode = BULLET.instantiate() as Area3D
 	get_tree().current_scene.add_child(bulletNode)
 	bulletNode.global_position = bullet_start_marker.global_position
-	bulletNode.direction = -_get_shoot_direction()
-	bulletNode.look_at(raycast_end.global_position)
-
+	bulletNode.direction = _get_shoot_direction()
+	bulletNode.look_at(bulletNode.global_position + bulletNode.direction, Vector3.UP)
+	
 func _get_shoot_direction():
 	var targetPoint: Vector3
 	
@@ -102,11 +89,45 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event is InputEventMouseMotion:
 			neck.rotate_y(-event.relative.x * 0.01)
 			camera.rotate_x(-event.relative.y * 0.01)
-			camera.rotation.x = clamp(camera.rotation.x, deg_to_rad(-60), deg_to_rad(60))
+			camera.rotation.x = clamp(camera.rotation.x, deg_to_rad(-90), deg_to_rad(90))
 		
 
+	if event.is_action_pressed(\"ads\") or Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		if not is_ads_active:
+			is_ads_active = true
+			_zoom(true)
+	elif is_ads_active:
+		is_ads_active = false
+		_zoom(false)
+
+var ads_tween: Tween
+func _zoom(is_ads: bool):
+	if ads_tween and ads_tween.is_running():
+		ads_tween.kill()
+		
+	ads_tween = create_tween().set_parallel(true).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	
+	if is_ads:
+		crosshair.visible = false
+		ads_tween.tween_property(camera, \"fov\", ads_fov, ads_speed)
+		if gun_node:
+			ads_tween.tween_property(gun_node, \"transform:origin\", gun_ads_position, ads_speed)
+			ads_tween.tween_property(gun_node, \"rotation_degrees\", gun_ads_rotation, ads_speed)
+	else:
+		crosshair.visible = true
+		ads_tween.tween_property(camera, \"fov\", normal_fov, ads_speed)
+		if gun_node:
+			ads_tween.tween_property(gun_node, \"transform:origin\", gun_default_position, ads_speed)
+			ads_tween.tween_property(gun_node, \"rotation\", gun_default_rotation, ads_speed)
+
 func _physics_process(delta: float) -> void:
-	# Add the gravity.
+	ray_cast_3d.force_raycast_update()
+	
+	if ray_cast_3d.is_colliding():
+		var collider = ray_cast_3d.get_collider()
+		var hit_normal = ray_cast_3d.get_collision_normal()
+		bullet_velocity = bullet_velocity.bounce(hit_normal)
+		
 	if not is_on_floor():
 		velocity += get_gravity() * 1.4 * delta
 
@@ -115,12 +136,12 @@ func _physics_process(delta: float) -> void:
 		velocity = Vector3.ZERO
 
 
-	# Handle jump.
+	
 	if Input.is_action_just_pressed(\"ui_accept\") and is_on_floor():
 		velocity.y = JUMP_VELOCITY
 
-	# Get the input direction and handle the movement/deceleration.
-	# As good practice, you should replace UI actions with custom gameplay actions.
+	
+	
 	var input_dir := Input.get_vector(\"left\", \"right\", \"forward\", \"back\")
 	var direction = (neck.transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 	if direction:
@@ -160,103 +181,38 @@ func _on_body_entered(body: Node3D) -> void:
 "
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_8vrlf"]
-size = Vector3(0.99523926, 1, 1)
+size = Vector3(0.99523926, 0.961792, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_v5gy4"]
+albedo_color = Color(0.9999997, 0.72396696, 0.31386906, 1)
+
+[sub_resource type="GDScript" id="GDScript_u7cuq"]
+resource_name = "jump pad"
+script/source = "extends Area3D
+
+@export var bounce_power: float = 20
+
+func _ready() -> void:
+	body_entered.connect(_on_body_entered)
+
+func _on_body_entered(body: Node3D) -> void:
+	if body is CharacterBody3D:
+		body.velocity.y = bounce_power
+"
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_d2pp6"]
 
 [node name="Node3D" type="Node3D" unique_id=563017054]
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1304675330]
 environment = SubResource("Environment_noarx")
 
-[node name="CSGCombiner3D" type="CSGCombiner3D" parent="." unique_id=1708800629]
-use_collision = true
-collision_layer = 3
-collision_mask = 3
-
-[node name="CSGBox3D5" type="CSGBox3D" parent="CSGCombiner3D" unique_id=1926084500]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -33.45182, 10.976046, 4.3954315)
-use_collision = true
-size = Vector3(5.3811035, 0.8696289, 5.3954315)
-
-[node name="CSGBox3D2" type="CSGBox3D" parent="CSGCombiner3D" unique_id=1837484992]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -20.809448, 5.0651855, 2.1977158)
-use_collision = true
-size = Vector3(5.3811035, 0.8696289, 5.3954315)
-
-[node name="CSGBox3D4" type="CSGBox3D" parent="CSGCombiner3D" unique_id=1547014714]
-transform = Transform3D(0.5524553, 0, 0, 0, 1, 0, 0, 0, 0.5525652, -27.445597, 3.9563394, 5.2250094)
-size = Vector3(5.3811035, 0.8696289, 5.3954315)
-material = SubResource("StandardMaterial3D_a202f")
-
-[node name="Area3D" type="Area3D" parent="CSGCombiner3D/CSGBox3D4" unique_id=1080603719]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.07978058, 0)
-script = SubResource("GDScript_8vrlf")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="CSGCombiner3D/CSGBox3D4/Area3D" unique_id=828778355]
-transform = Transform3D(4.363998, 0, 0, 0, 1.1992532, 0, 0, 0, 5.2627087, -0.028295517, 0.0079951435, 0)
-shape = SubResource("BoxShape3D_1vivr")
-
-[node name="OmniLight3D" type="OmniLight3D" parent="CSGCombiner3D/CSGBox3D4" unique_id=1584546054]
-light_color = Color(0.98628753, 0.72481215, 0.53670895, 1)
-light_energy = 6.763
-light_indirect_energy = 3.495
-light_volumetric_fog_energy = 7.28
-light_specular = 2.651
-
-[node name="CSGBox3D" type="CSGBox3D" parent="CSGCombiner3D" unique_id=2026854185]
-transform = Transform3D(-0.043124218, 0, 0.9990697, 0, 1, 0, -0.9990697, 0, -0.043124218, -56.74115, 18.71569, 7.5367293)
-size = Vector3(8, 6, 1)
-
-[node name="CSGCylinder3D" type="CSGCylinder3D" parent="CSGCombiner3D/CSGBox3D" unique_id=274208758]
-transform = Transform3D(2.6515272, 0, 0, 0, -4.371139e-08, -6.013548, 0, 1, -2.628605e-07, 0, -3.8328512, -0.36621112)
-operation = 2
-radius = 0.89404297
-height = 2.7324219
-sides = 64
-
-[node name="CSGBox3D3" type="CSGBox3D" parent="CSGCombiner3D" unique_id=1056268589]
-transform = Transform3D(-0.1312588, 0, 0.99995255, 0, 10.37322, 0, -13.477761, 0, -0.009738455, -65.59464, 20.722788, 4.278155)
-size = Vector3(1.090271, 1, 1)
-
-[node name="CSGBox3D7" type="CSGBox3D" parent="CSGCombiner3D" unique_id=615602141]
-transform = Transform3D(-14.272078, 0, -8.742277e-08, 0, 10.37322, 0, 1.2477046e-06, 0, -0.99999994, -38.32695, 11.3600445, -2.8922477)
-size = Vector3(3.969345, 2.8051758, 1)
-
-[node name="CSGBox3D8" type="CSGBox3D" parent="CSGCombiner3D" unique_id=1024792257]
-transform = Transform3D(-14.272078, 0, -8.742277e-08, 0, 10.37322, 0, 1.2477046e-06, 0, -0.99999994, -38.32695, 11.3600445, 11.63896)
-size = Vector3(3.969345, 2.8051758, 1)
-
-[node name="CSGBox3D6" type="CSGBox3D" parent="CSGCombiner3D" unique_id=1936019027]
-transform = Transform3D(0.34, 0, 0, 0, 1.115, 0, 0, 0, 0.34, -40.86366, 10.870796, 4.540885)
-size = Vector3(9.091797, 0.8696289, 10.034752)
-material = SubResource("StandardMaterial3D_a202f")
-
-[node name="Area3D" type="Area3D" parent="CSGCombiner3D/CSGBox3D6" unique_id=1761473196]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.07978058, 0)
-script = SubResource("GDScript_8vrlf")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="CSGCombiner3D/CSGBox3D6/Area3D" unique_id=329169316]
-transform = Transform3D(3.7942753, 0, 0, 0, 3.794275, 0, 0, 0, 3.7942753, -0.14822388, -0.0342741, -0.058012962)
-shape = SubResource("BoxShape3D_v5gy4")
-
-[node name="OmniLight3D" type="OmniLight3D" parent="CSGCombiner3D/CSGBox3D6" unique_id=775511730]
-light_color = Color(0.98628753, 0.72481215, 0.53670895, 1)
-light_energy = 10.118
-light_indirect_energy = 3.495
-light_volumetric_fog_energy = 7.28
-light_specular = 2.651
-omni_range = 2.796
-
-[node name="floor" type="CSGBox3D" parent="." unique_id=179422525]
-transform = Transform3D(1, 0, 0, 0, 0.3, 0, 0, 0, 10.4832, -56.34592, 15.894871, 4.2677283)
-use_collision = true
-size = Vector3(19.33252, 2.7163086, 1.3983765)
-
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1911072047]
-transform = Transform3D(-0.79758394, -0.60320795, -2.6367056e-08, 0, -4.371139e-08, 1, -0.60320795, 0.79758394, 3.48635e-08, -1.9293316e-07, 7.317207, 2.5510343e-07)
+transform = Transform3D(-0.79758394, -0.60320795, -2.6367056e-08, 0, -4.371139e-08, 1, -0.60320795, 0.79758394, 3.48635e-08, -7.146824e-07, 27.105133, 9.449798e-07)
 shadow_enabled = true
 
 [node name="CharacterBody3D" type="CharacterBody3D" parent="." unique_id=440747392]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -20.446617, 7.440138, 0.6767092)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -14.607262, 7.440138, 0.52587605)
 script = SubResource("GDScript_4xowi")
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="CharacterBody3D" unique_id=177396184]
@@ -277,19 +233,23 @@ transform = Transform3D(0.99999994, 0, 0, 0, 1, 0, 0, 0, 0.99999994, -1.1920929e
 
 [node name="RayCast3D" type="RayCast3D" parent="CharacterBody3D/neck/Camera3D/Sprite3D" unique_id=808812475]
 unique_name_in_owner = true
+target_position = Vector3(0, 0, -50)
+collision_mask = 4294967295
 
 [node name="RayCastEnd" type="Node3D" parent="CharacterBody3D/neck/Camera3D/Sprite3D/RayCast3D" unique_id=232592012]
 unique_name_in_owner = true
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -50)
 
 [node name="Automag 3" parent="CharacterBody3D/neck/Camera3D" unique_id=1462490123 instance=ExtResource("1_1tsdv")]
-transform = Transform3D(0.0021389592, 0, 0.07496946, 0, 0.075, 0, -0.07496946, 0, 0.0021389592, 0.308, -0.226, -0.579)
+transform = Transform3D(-3.278353e-09, 0, 0.07499997, 0, 0.075, 0, -0.07499997, 0, -3.278353e-09, 0.308, -0.226, -0.579)
 
 [node name="BulletStartMarker" type="Marker3D" parent="CharacterBody3D/neck/Camera3D/Automag 3" unique_id=1759235694]
 unique_name_in_owner = true
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.4704704, 1.7135808, 3.0198066e-14)
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 4.81537, 1.7135808, -3.015208e-08)
 
 [node name="CSGBox3D" type="CSGBox3D" parent="." unique_id=77037258]
-transform = Transform3D(1.6361578, 0, 0, 0, 0.3231352, 0, 0, 0, 1.6792159, -20.824192, 5.614029, 2.2757652)
+transform = Transform3D(1.6361578, 0, 0, 0, 0.3231352, 0, 0, 0, 1.6792159, -15.123661, 5.614029, 2.2757652)
+use_collision = true
 material = SubResource("StandardMaterial3D_1vivr")
 
 [node name="Area3D" type="Area3D" parent="CSGBox3D" unique_id=388962831]
@@ -297,11 +257,12 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1.0000001, 0, 0, 0)
 script = SubResource("GDScript_qbdty")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="CSGBox3D/Area3D" unique_id=1048928519]
-transform = Transform3D(1.0000002, 0, 0, 0, 1, 0, 0, 0, 0.9999999, -0.002380371, 0, 0)
+transform = Transform3D(1.0000002, 0, 0, 0, 1, 0, 0, 0, 0.9999999, -0.002380371, -0.019104004, 0)
 shape = SubResource("BoxShape3D_8vrlf")
 
 [node name="CSGBox3D2" type="CSGBox3D" parent="." unique_id=755182340]
-transform = Transform3D(1.6361578, 0, 0, 0, 0.3231352, 0, 0, 0, 1.6792159, -48.214294, 16.433014, 3.937676)
+transform = Transform3D(1.6361578, 0, 0, 0, 0.3231352, 0, 0, 0, 1.6792159, -58.63861, 15.271408, 2.8139958)
+use_collision = true
 material = SubResource("StandardMaterial3D_1vivr")
 
 [node name="Area3D" type="Area3D" parent="CSGBox3D2" unique_id=1203956859]
@@ -312,3 +273,75 @@ checkpoint_id = 2
 [node name="CollisionShape3D" type="CollisionShape3D" parent="CSGBox3D2/Area3D" unique_id=717331465]
 transform = Transform3D(1.0000002, 0, 0, 0, 1, 0, 0, 0, 0.9999999, -0.002380371, 0, 0)
 shape = SubResource("BoxShape3D_8vrlf")
+
+[node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=2041193576]
+
+[node name="Crosshair" type="CenterContainer" parent="CanvasLayer" unique_id=242412241]
+unique_name_in_owner = true
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="ColorRect" type="ColorRect" parent="CanvasLayer/Crosshair" unique_id=891486194]
+custom_minimum_size = Vector2(4, 4)
+layout_mode = 2
+mouse_filter = 2
+
+[node name="Blocks" type="Node3D" parent="." unique_id=1199791347]
+
+[node name="Block3D5" type="CSGBox3D" parent="Blocks" unique_id=718969300]
+transform = Transform3D(38.476048, 0, 0, 0, 1, 0, 0, 0, 21.94687, -75.30717, 14.691113, 3.019592)
+use_collision = true
+
+[node name="CSGBox3D" type="CSGBox3D" parent="Blocks" unique_id=1947809099]
+transform = Transform3D(10, 0, 0, 0, 23.310667, 0, 0, 0, 20, -86.642494, 26.183014, 2.7903748)
+use_collision = true
+
+[node name="CSGCylinder3D" type="CSGCylinder3D" parent="Blocks/CSGBox3D" unique_id=1406511028]
+transform = Transform3D(-9.775241e-08, -1.2, 0, 1.2869644, -4.1934626e-07, 0, 0, 0, 0.90000004, -0.5366173, -0.17101526, 0.0017135621)
+operation = 2
+radius = 0.499
+sides = 40
+
+[node name="CSGBox3D2" type="CSGBox3D" parent="Blocks" unique_id=1583653667]
+transform = Transform3D(5.183251, 0, 0, 0, 0.39397544, 0, 0, 0, 5.7756605, -14.890746, 5.212225, 2.1310425)
+use_collision = true
+size = Vector3(1.0771484, 1, 1)
+
+[node name="CSGBox3D4" type="CSGBox3D" parent="Blocks" unique_id=1441154839]
+transform = Transform3D(36.91977, 0, 0, 0, 23.01922, 0, 0, 0, 5.776359, -4.0569305, 31.961956, 15.501359)
+use_collision = true
+size = Vector3(5.263672, 3.6063232, 0.5410156)
+
+[node name="CSGBox3D5" type="CSGBox3D" parent="Blocks" unique_id=1789032369]
+transform = Transform3D(36.91977, 0, 0, 0, 23.01922, 0, 0, 0, 5.776359, -4.0569305, 31.961956, -9.528537)
+use_collision = true
+size = Vector3(5.263672, 3.6063232, 0.5410156)
+
+[node name="Jump pads" type="Node3D" parent="." unique_id=1055245138]
+
+[node name="Block3D4" type="CSGBox3D" parent="Jump pads" unique_id=595224992]
+transform = Transform3D(5.6499653, 0, 0, 0, 1, 0, 0, 0, 6.438594, -25.382576, 5.049039, 2.313003)
+use_collision = true
+material = SubResource("StandardMaterial3D_v5gy4")
+
+[node name="Area3D" type="Area3D" parent="Jump pads/Block3D4" unique_id=2131521763]
+script = SubResource("GDScript_u7cuq")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Jump pads/Block3D4/Area3D" unique_id=72143229]
+transform = Transform3D(1, 0, 0, 0, 1.2176986, 0, 0, 0, 1, 0, 0, 0)
+shape = SubResource("BoxShape3D_d2pp6")
+
+[node name="Block3D5" type="CSGBox3D" parent="Jump pads" unique_id=1166470989]
+transform = Transform3D(5.6499653, 0, 0, 0, 1, 0, 0, 0, 6.438594, -51.97943, 6.061673, 2.313003)
+use_collision = true
+material = SubResource("StandardMaterial3D_v5gy4")
+
+[node name="Area3D" type="Area3D" parent="Jump pads/Block3D5" unique_id=1666079377]
+script = SubResource("GDScript_u7cuq")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Jump pads/Block3D5/Area3D" unique_id=1343630034]
+transform = Transform3D(1, 0, 0, 0, 1.2176986, 0, 0, 0, 1, 0, 0, 0)
+shape = SubResource("BoxShape3D_d2pp6")
