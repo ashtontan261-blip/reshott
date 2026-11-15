@@ -1,6 +1,3 @@
 # Reshott
-This is a...
+This is a... made in GoDot 4!
 
-## Repository Structure
-
-## License
